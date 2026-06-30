@@ -8,8 +8,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from posixpath import basename as url_basename
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from .config import Config
@@ -156,9 +157,17 @@ class SlackNotifier:
         if not listings:
             return
         if self._can_post_thread_details():
-            parent_ts = self._post_message_with_bot(build_new_listings_payload(listings, self._config.site_url))
-            if parent_ts and self._config.slack_thread_details:
-                self._post_listing_details(parent_ts, listings)
+            parent_ts = self._post_message_with_bot(
+                build_new_listings_payload(listings, self._config.site_url, include_image_blocks=False),
+            )
+            if parent_ts:
+                for listing in listings:
+                    self._upload_listing_images(
+                        [listing.image_url] if listing.image_url else [],
+                        thread_ts=parent_ts,
+                    )
+                if self._config.slack_thread_details:
+                    self._post_listing_details(parent_ts, listings)
             return
 
         self.send_payload(build_new_listings_payload(listings, self._config.site_url))
@@ -169,9 +178,82 @@ class SlackNotifier:
     def _post_listing_details(self, parent_ts: str, listings: list[Listing]) -> None:
         for listing in listings:
             self._post_message_with_bot(
-                build_listing_details_payload(listing, self._config.site_url),
+                build_listing_details_payload(listing, self._config.site_url, include_image_blocks=False),
                 thread_ts=parent_ts,
             )
+            extra_urls = list(_additional_image_urls(listing))
+            self._upload_listing_images(extra_urls, thread_ts=parent_ts)
+
+    def _upload_listing_images(self, image_urls: list[str], *, thread_ts: str) -> None:
+        for url in image_urls:
+            try:
+                data, filename = _download_image(url, self._config.request_timeout_seconds)
+                self._slack_upload_file(data, filename, thread_ts=thread_ts)
+            except Exception:
+                LOGGER.warning("Failed to upload image %s", url, exc_info=True)
+
+    def _slack_upload_file(self, data: bytes, filename: str, *, thread_ts: str) -> None:
+        if not self._config.slack_bot_token or not self._config.slack_channel_id:
+            return
+
+        get_url_params = urlencode({"filename": filename, "length": len(data)})
+        get_url_request = Request(
+            f"https://slack.com/api/files.getUploadURLExternal?{get_url_params}",
+            headers={
+                "Authorization": f"Bearer {self._config.slack_bot_token}",
+                "User-Agent": self._config.user_agent,
+            },
+        )
+        get_url_resp = self._slack_api_call(get_url_request)
+        upload_url = get_url_resp.get("upload_url")
+        file_id = get_url_resp.get("file_id")
+        if not upload_url or not file_id:
+            raise SlackNotificationError("files.getUploadURLExternal did not return upload_url/file_id")
+
+        upload_request = Request(
+            upload_url,
+            data=data,
+            headers={
+                "Content-Type": "application/octet-stream",
+                "User-Agent": self._config.user_agent,
+            },
+            method="POST",
+        )
+        with urlopen(upload_request, timeout=self._config.request_timeout_seconds):
+            pass
+
+        complete_body = {
+            "files": [{"id": file_id, "title": filename}],
+            "channel_id": self._config.slack_channel_id,
+            "thread_ts": thread_ts,
+        }
+        complete_request = Request(
+            "https://slack.com/api/files.completeUploadExternal",
+            data=json.dumps(complete_body, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self._config.slack_bot_token}",
+                "Content-Type": "application/json; charset=utf-8",
+                "User-Agent": self._config.user_agent,
+            },
+            method="POST",
+        )
+        self._slack_api_call(complete_request)
+
+    def _slack_api_call(self, request: Request) -> dict[str, Any]:
+        try:
+            with urlopen(request, timeout=self._config.request_timeout_seconds) as response:
+                charset = response.headers.get_content_charset() or "utf-8"
+                data = json.loads(response.read().decode(charset))
+        except HTTPError as exc:
+            raise SlackNotificationError(f"Slack Web API returned HTTP {exc.code}") from exc
+        except URLError as exc:
+            raise SlackNotificationError(f"Failed to connect to Slack Web API: {exc.reason}") from exc
+        except json.JSONDecodeError as exc:
+            raise SlackNotificationError("Slack Web API returned invalid JSON") from exc
+
+        if not data.get("ok"):
+            raise SlackNotificationError(f"Slack Web API error: {data.get('error', 'unknown_error')}")
+        return data
 
     def _post_message_with_bot(self, payload: dict[str, Any], *, thread_ts: str | None = None) -> str | None:
         if not self._config.slack_bot_token or not self._config.slack_channel_id:
@@ -365,7 +447,9 @@ def format_new_listings_message(listings: list[Listing], site_url: str) -> str:
     return "\n\n".join(blocks)
 
 
-def build_new_listings_payload(listings: list[Listing], site_url: str) -> dict[str, Any]:
+def build_new_listings_payload(
+    listings: list[Listing], site_url: str, *, include_image_blocks: bool = True,
+) -> dict[str, Any]:
     text = format_new_listings_message(listings, site_url)
     if not listings:
         return {"text": text}
@@ -401,7 +485,7 @@ def build_new_listings_payload(listings: list[Listing], site_url: str) -> dict[s
             }
         )
 
-        if listing.image_url:
+        if include_image_blocks and listing.image_url:
             blocks.append(
                 {
                     "type": "image",
@@ -418,7 +502,9 @@ def build_new_listings_payload(listings: list[Listing], site_url: str) -> dict[s
     }
 
 
-def build_listing_details_payload(listing: Listing, site_url: str) -> dict[str, Any]:
+def build_listing_details_payload(
+    listing: Listing, site_url: str, *, include_image_blocks: bool = True,
+) -> dict[str, Any]:
     title_line = "\n".join(
         [
             "*詳細情報*",
@@ -445,14 +531,15 @@ def build_listing_details_payload(listing: Listing, site_url: str) -> dict[str, 
             }
         )
 
-    for image_url in _additional_image_urls(listing):
-        blocks.append(
-            {
-                "type": "image",
-                "image_url": image_url,
-                "alt_text": listing.title[:200] or "ShareWel item image",
-            }
-        )
+    if include_image_blocks:
+        for image_url in _additional_image_urls(listing):
+            blocks.append(
+                {
+                    "type": "image",
+                    "image_url": image_url,
+                    "alt_text": listing.title[:200] or "ShareWel item image",
+                }
+            )
 
     return {
         "text": f"詳細情報: {listing.title}",
@@ -460,6 +547,17 @@ def build_listing_details_payload(listing: Listing, site_url: str) -> dict[str, 
         "unfurl_links": True,
         "unfurl_media": True,
     }
+
+
+def _download_image(url: str, timeout: float) -> tuple[bytes, str]:
+    request = Request(url, headers={"User-Agent": "sharewell-alert/0.1"})
+    with urlopen(request, timeout=timeout) as response:
+        data = response.read()
+    parsed = urlparse(url)
+    filename = url_basename(parsed.path) or "image"
+    if "." not in filename:
+        filename += ".jpg"
+    return data, filename
 
 
 def _listing_detail_fields(listing: Listing) -> list[dict[str, str]]:

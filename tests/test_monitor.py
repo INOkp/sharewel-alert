@@ -185,6 +185,16 @@ class MonitorTests(unittest.TestCase):
             payload["blocks"][2],
         )
 
+    def test_build_new_listings_payload_excludes_image_blocks_when_disabled(self) -> None:
+        payload = build_new_listings_payload(
+            [Listing("1", "desk", "https://example.invalid/desk.jpg")],
+            "https://sharewel.example",
+            include_image_blocks=False,
+        )
+
+        image_blocks = [b for b in payload["blocks"] if b.get("type") == "image"]
+        self.assertEqual([], image_blocks)
+
     def test_build_listing_details_payload_includes_details_and_additional_images(self) -> None:
         payload = build_listing_details_payload(
             Listing(
@@ -207,6 +217,24 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual("詳細情報: desk", payload["text"])
         self.assertEqual("image", payload["blocks"][-1]["type"])
         self.assertEqual("https://example.invalid/extra.jpg", payload["blocks"][-1]["image_url"])
+
+    def test_build_listing_details_payload_excludes_image_blocks_when_disabled(self) -> None:
+        payload = build_listing_details_payload(
+            Listing(
+                "1",
+                "desk",
+                "https://example.invalid/main.jpg",
+                (
+                    "https://example.invalid/main.jpg",
+                    "https://example.invalid/extra.jpg",
+                ),
+            ),
+            "https://sharewel.example",
+            include_image_blocks=False,
+        )
+
+        image_blocks = [b for b in payload["blocks"] if b.get("type") == "image"]
+        self.assertEqual([], image_blocks)
 
 
 if __name__ == "__main__":
