@@ -1,0 +1,86 @@
+name: ShareWel Alert
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        required: true
+        default: "check"
+        type: choice
+        options:
+          - check
+          - slack-test
+          - simulate-new
+
+permissions:
+  contents: read
+  actions: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: sharewell-alert
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+      SLACK_THREAD_DETAILS: "true"
+      SHAREWEL_STATE_FILE: .sharewell_state.json
+      SHAREWEL_IN_STOCK_ONLY: "true"
+      SHAREWEL_EXPIRED_ALSO: "false"
+      SHAREWEL_LIMIT: "150"
+      SHAREWEL_REQUEST_TIMEOUT_SECONDS: "15"
+      RUN_MODE: ${{ github.event.inputs.mode || 'check' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Restore previous ShareWel state
+        if: env.RUN_MODE == 'check'
+        uses: actions/cache/restore@v5
+        with:
+          path: .sharewell_state.json
+          key: sharewell-state-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            sharewell-state-${{ github.ref_name }}-
+
+      - name: Run ShareWel check
+        run: |
+          case "$RUN_MODE" in
+            check)
+              python -m sharewell_alert --once
+              ;;
+            slack-test)
+              python -m sharewell_alert --send-test-notification
+              ;;
+            simulate-new)
+              python -m sharewell_alert --simulate-new-listing
+              ;;
+            *)
+              echo "Unknown RUN_MODE: $RUN_MODE" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Save ShareWel state
+        if: always() && env.RUN_MODE == 'check' && hashFiles('.sharewell_state.json') != ''
+        uses: actions/cache/save@v5
+        with:
+          path: .sharewell_state.json
+          key: sharewell-state-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
