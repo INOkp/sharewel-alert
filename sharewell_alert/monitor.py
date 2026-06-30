@@ -219,15 +219,27 @@ class SlackNotifier:
             },
             method="POST",
         )
-        resp = self._slack_api_call(complete_request)
+        self._slack_api_call(complete_request)
 
-        files = resp.get("files") or []
-        if files:
-            shares = files[0].get("shares") or {}
-            public = shares.get("public") or {}
-            channel_shares = public.get(self._config.slack_channel_id) or []
-            if channel_shares:
-                return channel_shares[0].get("ts")
+        return self._get_latest_message_ts()
+
+    def _get_latest_message_ts(self) -> str | None:
+        params = urlencode({"channel": self._config.slack_channel_id, "limit": 1})
+        request = Request(
+            f"https://slack.com/api/conversations.history?{params}",
+            headers={
+                "Authorization": f"Bearer {self._config.slack_bot_token}",
+                "User-Agent": self._config.user_agent,
+            },
+        )
+        try:
+            resp = self._slack_api_call(request)
+            messages = resp.get("messages") or []
+            if messages:
+                return messages[0].get("ts")
+        except Exception:
+            LOGGER.warning("Failed to retrieve message ts for threading", exc_info=True)
+        return None
 
     def _slack_upload_file_data(self, data: bytes, filename: str) -> str:
         get_url_params = urlencode({"filename": filename, "length": len(data)})
