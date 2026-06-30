@@ -170,8 +170,10 @@ class SlackNotifier:
                     )
                 except Exception:
                     LOGGER.warning("Image upload failed, falling back to text", exc_info=True)
-
-            if parent_ts is None:
+                    parent_ts = self._post_message_with_bot(
+                        build_new_listings_payload(listings, self._config.site_url),
+                    )
+            else:
                 parent_ts = self._post_message_with_bot(
                     build_new_listings_payload(listings, self._config.site_url),
                 )
