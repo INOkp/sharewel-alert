@@ -179,17 +179,39 @@ class SlackNotifier:
             self._upload_listing_images(extra_urls, thread_ts=parent_ts)
 
     def _upload_listing_images(self, image_urls: list[str], *, thread_ts: str) -> None:
+        if not image_urls or not self._config.slack_bot_token or not self._config.slack_channel_id:
+            return
+
+        uploaded_files: list[dict[str, str]] = []
         for url in image_urls:
             try:
                 data, filename = _download_image(url, self._config.request_timeout_seconds)
-                self._slack_upload_file(data, filename, thread_ts=thread_ts)
+                file_id = self._slack_upload_file_data(data, filename)
+                uploaded_files.append({"id": file_id, "title": filename})
             except Exception:
                 LOGGER.warning("Failed to upload image %s", url, exc_info=True)
 
-    def _slack_upload_file(self, data: bytes, filename: str, *, thread_ts: str) -> None:
-        if not self._config.slack_bot_token or not self._config.slack_channel_id:
+        if not uploaded_files:
             return
 
+        complete_body = {
+            "files": uploaded_files,
+            "channel_id": self._config.slack_channel_id,
+            "thread_ts": thread_ts,
+        }
+        complete_request = Request(
+            "https://slack.com/api/files.completeUploadExternal",
+            data=json.dumps(complete_body, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self._config.slack_bot_token}",
+                "Content-Type": "application/json; charset=utf-8",
+                "User-Agent": self._config.user_agent,
+            },
+            method="POST",
+        )
+        self._slack_api_call(complete_request)
+
+    def _slack_upload_file_data(self, data: bytes, filename: str) -> str:
         get_url_params = urlencode({"filename": filename, "length": len(data)})
         get_url_request = Request(
             f"https://slack.com/api/files.getUploadURLExternal?{get_url_params}",
@@ -216,22 +238,7 @@ class SlackNotifier:
         with urlopen(upload_request, timeout=self._config.request_timeout_seconds):
             pass
 
-        complete_body = {
-            "files": [{"id": file_id, "title": filename}],
-            "channel_id": self._config.slack_channel_id,
-            "thread_ts": thread_ts,
-        }
-        complete_request = Request(
-            "https://slack.com/api/files.completeUploadExternal",
-            data=json.dumps(complete_body, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self._config.slack_bot_token}",
-                "Content-Type": "application/json; charset=utf-8",
-                "User-Agent": self._config.user_agent,
-            },
-            method="POST",
-        )
-        self._slack_api_call(complete_request)
+        return file_id
 
     def _slack_api_call(self, request: Request) -> dict[str, Any]:
         try:
