@@ -263,8 +263,8 @@ class SlackNotifier:
             "channel": self._config.slack_channel_id,
             "text": payload.get("text") or "",
             "blocks": payload.get("blocks") or [],
-            "unfurl_links": payload.get("unfurl_links", True),
-            "unfurl_media": payload.get("unfurl_media", True),
+            "unfurl_links": payload.get("unfurl_links", False),
+            "unfurl_media": payload.get("unfurl_media", False),
         }
         if thread_ts:
             body["thread_ts"] = thread_ts
@@ -497,8 +497,8 @@ def build_new_listings_payload(
     return {
         "text": text,
         "blocks": blocks,
-        "unfurl_links": True,
-        "unfurl_media": True,
+        "unfurl_links": False,
+        "unfurl_media": False,
     }
 
 
@@ -544,8 +544,8 @@ def build_listing_details_payload(
     return {
         "text": f"詳細情報: {listing.title}",
         "blocks": blocks,
-        "unfurl_links": True,
-        "unfurl_media": True,
+        "unfurl_links": False,
+        "unfurl_media": False,
     }
 
 
