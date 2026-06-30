@@ -168,15 +168,8 @@ class SlackNotifier:
             return
         if self._can_post_thread_details():
             parent_ts = self._post_message_with_bot(
-                build_new_listings_payload(listings, self._config.site_url, include_image_blocks=False),
+                build_new_listings_payload(listings, self._config.site_url),
             )
-
-            all_image_urls: list[str] = []
-            for listing in listings:
-                all_image_urls.extend(listing.image_urls)
-            if all_image_urls:
-                self._upload_images_to_channel(all_image_urls)
-
             if parent_ts and self._config.slack_thread_details:
                 self._post_listing_details(parent_ts, listings)
             return
@@ -192,8 +185,11 @@ class SlackNotifier:
                 build_listing_details_payload(listing, self._config.site_url, include_image_blocks=False),
                 thread_ts=parent_ts,
             )
+            extra_urls = list(_additional_image_urls(listing))
+            if extra_urls:
+                self._upload_images_to_thread(extra_urls, thread_ts=parent_ts)
 
-    def _upload_images_to_channel(self, image_urls: list[str]) -> None:
+    def _upload_images_to_thread(self, image_urls: list[str], *, thread_ts: str) -> None:
         if not self._config.slack_bot_token or not self._config.slack_channel_id:
             return
 
@@ -212,6 +208,7 @@ class SlackNotifier:
         complete_body = {
             "files": uploaded_files,
             "channel_id": self._config.slack_channel_id,
+            "thread_ts": thread_ts,
         }
         complete_request = Request(
             "https://slack.com/api/files.completeUploadExternal",
