@@ -158,16 +158,10 @@ class SlackNotifier:
             return
         if self._can_post_thread_details():
             parent_ts = self._post_message_with_bot(
-                build_new_listings_payload(listings, self._config.site_url, include_image_blocks=False),
+                build_new_listings_payload(listings, self._config.site_url),
             )
-            if parent_ts:
-                for listing in listings:
-                    self._upload_listing_images(
-                        [listing.image_url] if listing.image_url else [],
-                        thread_ts=parent_ts,
-                    )
-                if self._config.slack_thread_details:
-                    self._post_listing_details(parent_ts, listings)
+            if parent_ts and self._config.slack_thread_details:
+                self._post_listing_details(parent_ts, listings)
             return
 
         self.send_payload(build_new_listings_payload(listings, self._config.site_url))
