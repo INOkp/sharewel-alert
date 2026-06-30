@@ -157,9 +157,21 @@ class SlackNotifier:
         if not listings:
             return
         if self._can_post_thread_details():
-            parent_ts = self._post_message_with_bot(
-                build_new_listings_payload(listings, self._config.site_url),
-            )
+            all_image_urls: list[str] = []
+            for listing in listings:
+                all_image_urls.extend(listing.image_urls)
+
+            text = format_new_listings_message(listings, self._config.site_url)
+            parent_ts = None
+
+            if all_image_urls:
+                parent_ts = self._post_with_uploaded_images(text, all_image_urls)
+
+            if parent_ts is None:
+                parent_ts = self._post_message_with_bot(
+                    build_new_listings_payload(listings, self._config.site_url),
+                )
+
             if parent_ts and self._config.slack_thread_details:
                 self._post_listing_details(parent_ts, listings)
             return
@@ -175,12 +187,10 @@ class SlackNotifier:
                 build_listing_details_payload(listing, self._config.site_url, include_image_blocks=False),
                 thread_ts=parent_ts,
             )
-            extra_urls = list(_additional_image_urls(listing))
-            self._upload_listing_images(extra_urls, thread_ts=parent_ts)
 
-    def _upload_listing_images(self, image_urls: list[str], *, thread_ts: str) -> None:
-        if not image_urls or not self._config.slack_bot_token or not self._config.slack_channel_id:
-            return
+    def _post_with_uploaded_images(self, text: str, image_urls: list[str]) -> str | None:
+        if not self._config.slack_bot_token or not self._config.slack_channel_id:
+            return None
 
         uploaded_files: list[dict[str, str]] = []
         for url in image_urls:
@@ -192,12 +202,12 @@ class SlackNotifier:
                 LOGGER.warning("Failed to upload image %s", url, exc_info=True)
 
         if not uploaded_files:
-            return
+            return None
 
         complete_body = {
             "files": uploaded_files,
             "channel_id": self._config.slack_channel_id,
-            "thread_ts": thread_ts,
+            "initial_comment": text,
         }
         complete_request = Request(
             "https://slack.com/api/files.completeUploadExternal",
@@ -209,7 +219,15 @@ class SlackNotifier:
             },
             method="POST",
         )
-        self._slack_api_call(complete_request)
+        resp = self._slack_api_call(complete_request)
+
+        files = resp.get("files") or []
+        if files:
+            shares = files[0].get("shares") or {}
+            public = shares.get("public") or {}
+            channel_shares = public.get(self._config.slack_channel_id) or []
+            if channel_shares:
+                return channel_shares[0].get("ts")
 
     def _slack_upload_file_data(self, data: bytes, filename: str) -> str:
         get_url_params = urlencode({"filename": filename, "length": len(data)})
