@@ -161,11 +161,15 @@ class SlackNotifier:
             for listing in listings:
                 all_image_urls.extend(listing.image_urls)
 
-            text = format_new_listings_message(listings, self._config.site_url)
             parent_ts = None
-
             if all_image_urls:
-                parent_ts = self._post_with_uploaded_images(text, all_image_urls)
+                try:
+                    parent_ts = self._post_with_uploaded_images(
+                        format_new_listings_message(listings, self._config.site_url),
+                        all_image_urls,
+                    )
+                except Exception:
+                    LOGGER.warning("Image upload failed, falling back to text", exc_info=True)
 
             if parent_ts is None:
                 parent_ts = self._post_message_with_bot(
@@ -190,7 +194,7 @@ class SlackNotifier:
 
     def _post_with_uploaded_images(self, text: str, image_urls: list[str]) -> str | None:
         if not self._config.slack_bot_token or not self._config.slack_channel_id:
-            return None
+            raise SlackNotificationError("SLACK_BOT_TOKEN and SLACK_CHANNEL_ID are required")
 
         uploaded_files: list[dict[str, str]] = []
         for url in image_urls:
@@ -202,7 +206,7 @@ class SlackNotifier:
                 LOGGER.warning("Failed to upload image %s", url, exc_info=True)
 
         if not uploaded_files:
-            return None
+            raise SlackNotificationError("All image uploads failed")
 
         complete_body = {
             "files": uploaded_files,
@@ -221,6 +225,7 @@ class SlackNotifier:
         )
         self._slack_api_call(complete_request)
 
+        time.sleep(1)
         return self._get_latest_message_ts()
 
     def _get_latest_message_ts(self) -> str | None:
