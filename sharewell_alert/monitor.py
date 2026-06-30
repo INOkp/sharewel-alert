@@ -153,33 +153,31 @@ class SlackNotifier:
             return
         self.send_payload({"text": text})
 
+    def send_error(self, message: str) -> None:
+        try:
+            text = f"⚠️ ShareWel Alert error:\n```\n{message}\n```"
+            if self._can_post_thread_details():
+                self._post_message_with_bot({"text": text})
+            else:
+                self.send_payload({"text": text})
+        except Exception:
+            LOGGER.warning("Failed to send error to Slack", exc_info=True)
+
     def send_listings(self, listings: list[Listing]) -> None:
         if not listings:
             return
         if self._can_post_thread_details():
-            all_image_urls: list[str] = []
-            for listing in listings:
-                all_image_urls.extend(listing.image_urls)
-
-            parent_ts = None
-            if all_image_urls:
-                try:
-                    parent_ts = self._post_with_uploaded_images(
-                        format_new_listings_message(listings, self._config.site_url),
-                        all_image_urls,
-                    )
-                except Exception:
-                    LOGGER.warning("Image upload failed, falling back to text", exc_info=True)
-                    parent_ts = self._post_message_with_bot(
-                        build_new_listings_payload(listings, self._config.site_url),
-                    )
-            else:
-                parent_ts = self._post_message_with_bot(
-                    build_new_listings_payload(listings, self._config.site_url),
-                )
-
-            if parent_ts and self._config.slack_thread_details:
-                self._post_listing_details(parent_ts, listings)
+            parent_ts = self._post_message_with_bot(
+                build_new_listings_payload(listings, self._config.site_url, include_image_blocks=False),
+            )
+            if parent_ts:
+                all_image_urls: list[str] = []
+                for listing in listings:
+                    all_image_urls.extend(listing.image_urls)
+                if all_image_urls:
+                    self._upload_images_to_thread(all_image_urls, thread_ts=parent_ts)
+                if self._config.slack_thread_details:
+                    self._post_listing_details(parent_ts, listings)
             return
 
         self.send_payload(build_new_listings_payload(listings, self._config.site_url))
@@ -194,9 +192,9 @@ class SlackNotifier:
                 thread_ts=parent_ts,
             )
 
-    def _post_with_uploaded_images(self, text: str, image_urls: list[str]) -> str | None:
+    def _upload_images_to_thread(self, image_urls: list[str], *, thread_ts: str) -> None:
         if not self._config.slack_bot_token or not self._config.slack_channel_id:
-            raise SlackNotificationError("SLACK_BOT_TOKEN and SLACK_CHANNEL_ID are required")
+            return
 
         uploaded_files: list[dict[str, str]] = []
         for url in image_urls:
@@ -208,12 +206,12 @@ class SlackNotifier:
                 LOGGER.warning("Failed to upload image %s", url, exc_info=True)
 
         if not uploaded_files:
-            raise SlackNotificationError("All image uploads failed")
+            return
 
         complete_body = {
             "files": uploaded_files,
             "channel_id": self._config.slack_channel_id,
-            "initial_comment": text,
+            "thread_ts": thread_ts,
         }
         complete_request = Request(
             "https://slack.com/api/files.completeUploadExternal",
@@ -226,27 +224,6 @@ class SlackNotifier:
             method="POST",
         )
         self._slack_api_call(complete_request)
-
-        time.sleep(1)
-        return self._get_latest_message_ts()
-
-    def _get_latest_message_ts(self) -> str | None:
-        params = urlencode({"channel": self._config.slack_channel_id, "limit": 1})
-        request = Request(
-            f"https://slack.com/api/conversations.history?{params}",
-            headers={
-                "Authorization": f"Bearer {self._config.slack_bot_token}",
-                "User-Agent": self._config.user_agent,
-            },
-        )
-        try:
-            resp = self._slack_api_call(request)
-            messages = resp.get("messages") or []
-            if messages:
-                return messages[0].get("ts")
-        except Exception:
-            LOGGER.warning("Failed to retrieve message ts for threading", exc_info=True)
-        return None
 
     def _slack_upload_file_data(self, data: bytes, filename: str) -> str:
         get_url_params = urlencode({"filename": filename, "length": len(data)})
@@ -374,8 +351,12 @@ def check_once(
 
     notified = False
     if new_listings:
-        notifier.send_listings(new_listings)
-        notified = True
+        try:
+            notifier.send_listings(new_listings)
+            notified = True
+        except Exception as exc:
+            LOGGER.exception("Failed to send listings")
+            notifier.send_error(str(exc))
 
     save_state(config.state_file, current_map)
     return CheckResult(
